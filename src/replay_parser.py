@@ -13,7 +13,6 @@ Mandatory arguments:
 
     pcap_folder: This is the folder containing pcap file and client_ip.txt
 
-
 Ignored streams:
     - Local (private) IPs
     - Apple IPs (happens when recording on an Apple product, e.g. iPhone):
@@ -25,19 +24,25 @@ Ignored streams:
         -can't filter using IP address, because it's hosted on Akamai
     
 
+IMPORTANT:  to make sure when parsing the random version of a pcap, skipped streams are consistant
+            between random and non-random, ALWAYS parse non-random first. The parser will dump an
+            object with contains skipped streams (streamSkippedList)
+            Then when doing the random parse (which has the same folder name plus a _random at the end)
+            it will look into the non-random parsed folder, loads streamSkippedList and makes sure to
+            also skip those streams.
 #######################################################################################################
 #######################################################################################################
 '''
 
 
 import sys, os, pickle, copy, mimetools, StringIO, email, re, random, string
+import ipaddress
 import python_lib
 from python_lib import *
 
 DEBUG = 2
-ipIgnoreList = ['017.154.239.013', '017.154.239.023', '017.172.239.039', '017.154.239.048', '017.173.255.051', 
-                '017.173.255.052', '017.173.255.061', '017.173.255.024', '017.173.255.072', '017.154.239.034',
-                '017.154.239.049', '017.173.255.103', '017.173.066.180']
+
+ipIgnoreList = ['17.0.0.0/8']   #Apple ip range --> see it a lot when recording on iPhone/iPad
 
 def getUDPstreamsMap(pcap_file, client_ip):
     command = 'tshark -r ' + pcap_file + ' -2 -R "udp" -T fields -e ip.src -e udp.srcport -e ip.dst -e udp.dstport > tmp'
@@ -64,7 +69,8 @@ def getUDPstreamsMap(pcap_file, client_ip):
 
 def createPacketMeta(pcapFile, outFile):
     command = ' '.join(['tshark -r', pcapFile, 
-                        '-2 -R "not tcp.analysis.retransmission"',
+#                         '-2 -R "not tcp.analysis.retransmission"',
+                        '-2 -R "not tcp.analysis.retransmission && not tcp.analysis.out_of_order"',
                         '-T fields', 
                         '-e frame.number', '-e frame.protocols', '-e frame.time_relative', 
                         '-e tcp.stream'  , '-e udp.stream'     , 
@@ -107,7 +113,8 @@ def extractStreams(pcap_file, follow_folder, client_ip, protocol, UDPstreamsMap=
     protocol = protocol.lower()
     
     noRetransmitPcap = pcap_file.rpartition('.')[0]+'_no_retransmits.pcap'
-    command          = 'tshark -2 -R "not tcp.analysis.retransmission" -r {} -w {}'.format(pcap_file, noRetransmitPcap)
+#     command          = 'tshark -2 -R "not tcp.analysis.retransmission" -r {} -w {}'.format(pcap_file, noRetransmitPcap)
+    command          = 'tshark -2 -R "not tcp.analysis.retransmission && not tcp.analysis.out_of_order" -r {} -w {}'.format(pcap_file, noRetransmitPcap)
     os.system(command)
     
     if protocol == 'tcp':
@@ -128,10 +135,14 @@ def extractStreams(pcap_file, follow_folder, client_ip, protocol, UDPstreamsMap=
         streams = getUDPstreamsMap(pcap_file, client_ip)
         for s in streams:
             csp = convert_ip(s.replace(':', '.').split(',')[0]) + '.' + convert_ip(s.replace(':', '.').split(',')[1])
-            if isLocal(csp[:15]) or  isLocal(csp[22:-6]):
+            
+            if isPrivate(csp[:15]) and isPrivate(csp[22:-6]):
+                print '\t\tIS LOCAL!!! Skipping:', csp
                 continue
+
             filename = UDPstreamsMap[csp]
             print '\tDoing UDP stream:', filename
+            
             command = "tshark -r " + pcap_file + " -qz follow," + protocol + ",raw,"+ s + ' > ' + follow_folder + '/follow-stream-' + filename +'.txt'
             os.system(command)
 
@@ -245,19 +256,6 @@ def sortAndClean(tcpMetas):
                         new_tcpMetas[stream][talker].append(new_x)
     return new_tcpMetas
 
-def random_hex_bu(size):
-    '''
-    Takes the size of the random hex string it should generate:
-        1-Generates a random string (chars and numbers) of size/2
-        2-Encodes the generated randon string into hex
-        
-    Note: one ascii char will have length of 2 when converted to hex
-    '''
-    assert( size % 2 == 0)
-    size = size/2
-    asciiPayload = ''.join(random.choice(string.ascii_letters + string.digits) for x in range(size))
-    return asciiPayload.encode('hex')
-
 def random_ascii_by_size(size):
     return ''.join(random.choice(string.ascii_letters + string.digits) for x in range(size))
     
@@ -305,7 +303,7 @@ class Request(object):
         (self.method, path_params, self.protocol) = req.split(' ')
         (self.path, dummy, params)                = path_params.partition('?')
         self.params                               = re.findall(r"(?P<name>.*?)=(?P<value>.*?)&"  , params+'&')        
-        self.headers                              = re.findall(r"(?P<name>.*?): (?P<value>.*?){}".format(splitter), head)
+        self.headers                              = re.findall(r"(?P<name>.*?): (?P<value>.*?){}".format(splitter), head+'\r\n')
         
     def createRequestPacket(self):
         serializedParams  = '&'.join([k[0] + '=' + random_ascii_by_size(len(k[1]))  for k in self.params])
@@ -424,7 +422,6 @@ def readNextPacket(streamMeta, streamHandle, randomPayload=False):
         try:
             [talking, payload]  = streamHandle.next()
             p                   = streamMeta[talking][counter[talking]]
-            
             if p.length != len(payload)/2:
                 if '6279746573206d697373696e6720696e20636170747572652066696c655d' in payload:
                     continue
@@ -495,10 +492,32 @@ class singlePacket(object):
             self.serverPort = self.srcPort
             self.csp        = convert_ip(self.dstIP+'.'+str(self.dstPort)) + '-' + convert_ip(self.srcIP+'.'+str(self.srcPort))
 
+def isPrivate(ip):
+    ip = convert_back_ip(ip)
+    ip = unicode(ip)
+    return ipaddress.ip_address(ip).is_private
+
+def isInNetworks(ip, listOfNetworks):
+    ip = convert_back_ip(ip)
+    ip = unicode(ip)
+    ip = ipaddress.ip_address(ip)
+    
+    for n in listOfNetworks:
+        n = ipaddress.IPv4Network(unicode(n))
+        if ip in n:
+            return True
+        
+    return False
+
 def isLocal(ip):
+    '''
+    DEPRECATED!!!
+    
+    use isPrivate() function instead
+    '''
     ip = ip.split('.')
 
-    if ip[0] == '10':
+    if ip[0] in ['10', '010']:
         return True
     if ip[0] == '172' and 16<=int(ip[1])<=31:
         return True
@@ -519,6 +538,13 @@ def run(*args):
     configs.show_all()
     configs.set('pcap_folder', os.path.abspath(configs.get('pcap_folder')))
     
+    try:
+        onlyStreams = configs.get('onlyStreams').split(',')
+    except KeyError:
+        onlyStreams   = []      #if this list is NOT empty, ONLY streams in this list will be considered!
+    streamSkippedList = []      #This will save all skipped streames to be used when parsing for random
+    streamIgnoreList  = []      #example: streamIgnoreList = ['0', '1']
+                                #if you need to skip a stream, add it to streamIgnoreList 
     
     '''##########################################################'''
     PRINT_ACTION('Locating necessary files', 0)
@@ -595,13 +621,12 @@ def run(*args):
             
             #1-Do necessary checks and skip when necessary
                         
-            #1b-Skip no-man's packets or unknown protocols
+            #1a-Skip no-man's packets or unknown protocols
             if (dPacket.talking is None) or (dPacket.stream is None):
                 continue
             
-            #1a-Skip local flows (mostly happens for DNS)
-            if ((dPacket.talking == 'c' and isLocal(dPacket.dstIP)) or 
-                (dPacket.talking == 's' and isLocal(dPacket.srcIP))   ):
+            #1b-Skip local flows (mostly happens for DNS)            
+            if isPrivate(dPacket.srcIP) and isPrivate(dPacket.dstIP):
                 continue
             
             #1c-Skip no-payload packets
@@ -672,12 +697,23 @@ def run(*args):
     diss   = []
     getLUT = {}
     
-    streamIgnoreList = []   #example: streamIgnoreList = ['0', '1']
+    if configs.get('randomPayload'):
+        nonRandomStreamSkippedList = configs.get('pcap_folder').rpartition('_random')[0] + '/streamSkippedList.pickle'
+        if os.path.isfile(nonRandomStreamSkippedList):
+            nonRandomStreamSkippedList = pickle.load( open(nonRandomStreamSkippedList, 'r') )
+            streamIgnoreList += nonRandomStreamSkippedList
     
     for stream in sorted(tcpMetas.keys()):
         if DEBUG == 2: print '\tDoing stream:', stream, len(tcpMetas[stream]['c']), len(tcpMetas[stream]['s'])
         
+        if onlyStreams:
+            if stream not in onlyStreams:
+                streamSkippedList.append(stream)
+                print '\t\tStream not in onlyStreams list, skipping'
+                continue 
+        
         if stream in streamIgnoreList:
+            streamSkippedList.append(stream)
             print '\t\tStream in ignore list, skipping'
             continue
         
@@ -692,12 +728,15 @@ def run(*args):
         #1- IP based filtering
         serverIP = csp[22:37]
         
-        if serverIP in ipIgnoreList:
+#         if serverIP in ipIgnoreList:
+        if isInNetworks(serverIP, ipIgnoreList):
+            streamSkippedList.append(stream)
             print '\t\tIgnoring stream {}. Server IP in ignore list!'.format(csp)
             continue
         
         #2- Request based filtering
         if 'Host: static.ess.apple.com:80' in TMPclientQ[0].payload.decode('hex'):
+            streamSkippedList.append(stream)
             print '\t\tIgnoring stream {}. apple static!'.format(csp)
             continue
         '''
@@ -708,6 +747,7 @@ def run(*args):
         theHash = hash(toHash)
         
         if theHash in LUT['tcp']:
+            streamSkippedList.append(stream)
             print '\n\t*******************************************'
             print '\t*******************************************'
             print '\tATTENTION: take a look!!!'
@@ -750,17 +790,18 @@ def run(*args):
     for serverIP in udpServers:
         udpServers[serverIP] = list(udpServers[serverIP])
     
-    PRINT_ACTION('Serializing TCP', 1, action=False)
-    pickle.dump((tcpClientQ, list(tcpCSPs) , replay_name)                , open((pcap_file+'_client_tcp.pickle'), "w" ), 2)
-    pickle.dump((serverQ['tcp'], tcpServerPorts, replay_name, LUT['tcp']), open((pcap_file+'_server_tcp.pickle'), "w" ), 2)
-    json.dump((tcpClientQ, list(tcpCSPs)   , replay_name)                , open((pcap_file+'_client_tcp.json'), "w") , cls=TCP_UDPjsonEncoder)
-     
-    PRINT_ACTION('Serializing UDP', 1, action=False)
-    pickle.dump((udpClientQ, udpClientPorts, {}, replay_name)        , open((pcap_file+'_client_udp.pickle'), "w" ), 2)
-    pickle.dump((serverQ['udp'], LUT['udp'], udpServers, replay_name), open((pcap_file+'_server_udp.pickle'), "w" ), 2)
-    json.dump((udpClientQ, udpClientPorts, {}, replay_name)          , open((pcap_file+'_client_udp.json'), "w"), cls=TCP_UDPjsonEncoder)
+#     PRINT_ACTION('Serializing TCP', 1, action=False)
+#     pickle.dump((tcpClientQ, list(tcpCSPs) , replay_name)                , open((pcap_file+'_client_tcp.pickle'), "w" ), 2)
+#     pickle.dump((serverQ['tcp'], tcpServerPorts, replay_name, LUT['tcp']), open((pcap_file+'_server_tcp.pickle'), "w" ), 2)
+#     json.dump((tcpClientQ, list(tcpCSPs)   , replay_name)                , open((pcap_file+'_client_tcp.json'), "w") , cls=TCP_UDPjsonEncoder)
+#      
+#     PRINT_ACTION('Serializing UDP', 1, action=False)
+#     pickle.dump((udpClientQ, udpClientPorts, {}, replay_name)        , open((pcap_file+'_client_udp.pickle'), "w" ), 2)
+#     pickle.dump((serverQ['udp'], LUT['udp'], udpServers, replay_name), open((pcap_file+'_server_udp.pickle'), "w" ), 2)
+#     json.dump((udpClientQ, udpClientPorts, {}, replay_name)          , open((pcap_file+'_client_udp.json'), "w"), cls=TCP_UDPjsonEncoder)
     
     PRINT_ACTION('Serializing all', 1, action=False)
+    pickle.dump(streamSkippedList, open((configs.get('pcap_folder')+'/streamSkippedList.pickle'), "w" ), 2)
     pickle.dump((clientQ, udpClientPorts, list(tcpCSPs), replay_name)          , open((pcap_file+'_client_all.pickle'), "w" ), 2)
     pickle.dump((serverQ, LUT, getLUT, udpServers, tcpServerPorts, replay_name), open((pcap_file+'_server_all.pickle'), "w" ), 2)
     json.dump((clientQ, udpClientPorts, list(tcpCSPs), replay_name)            , open((pcap_file+'_client_all.json'), "w"), cls=TCP_UDPjsonEncoder)
@@ -780,6 +821,9 @@ def run(*args):
     print '\t#UDP CSPs:        ', len(serverQ['udp'])
     print '\t#UDP servers:     ', len(udpServers)
     print '\t#TCP server ports:', len(list(tcpServerPorts))
+    print '\tstreamSkippedList:', streamSkippedList
+
+    print 'onlyStreams:', onlyStreams
     
 def main():
     run(sys.argv)

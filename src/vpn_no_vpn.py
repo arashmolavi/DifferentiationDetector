@@ -23,9 +23,22 @@ Example:
 #######################################################################################################
 '''
 
-import sys, commands, time, urllib2, urllib, json, multiprocessing
+import sys, commands, time, urllib2, urllib, json, multiprocessing, psutil
 import replay_client, python_lib
 from python_lib import *
+
+def getIPofInterface(interface):
+    output = commands.getoutput('ifconfig')
+    lines  = output.split('\n')
+    
+    for i in range(len(lines)):
+        if lines[i].startswith(interface+':'):
+            break
+    
+    l = lines[i+3].strip()
+    assert( l.startswith('inet') )
+
+    return l.split(' ')[1]
 
 class UI(object):
     '''
@@ -107,16 +120,6 @@ class UI(object):
         res = urllib2.urlopen(req).read()
         return json.loads(res)
 
-def toggleVPN(command):
-    '''
-    This function connects/disconnects the VPN
-    
-    NOTE: such function by nature platform dependent!
-          Current script is an AppleScript and for Mac OS X.
-          Need scripts for Linux and maybe Windows (urgh!) too! should be straight forward
-    '''
-    print commands.getoutput('./meddle_vpn.sh ' + command)
-
 def run_one(round, tries, vpn=False):
     '''
     Runs the client script once.
@@ -131,9 +134,14 @@ def run_one(round, tries, vpn=False):
 
     tryC = 1
     while tryC <= tries:
+        
+        startNetUsage = psutil.net_io_counters(pernic=True)
+        
         p = multiprocessing.Process( target=replay_client.run )
         p.start()
         p.join()
+        
+        endNetUsage = psutil.net_io_counters(pernic=True)
         
         PRINT_ACTION('Done with {}. Exit code: {}'.format(Configs().get('testID'), p.exitcode), 0)
         tryC += 1
@@ -148,14 +156,21 @@ def run_one(round, tries, vpn=False):
             Configs().set('extraString', Configs().get('extraString')+'-addHeader')
             print '\n\n*****ATTENTION: there seems to be IP flipping happening. Will addHeader from now on.*****\n\n'
         
-    return p.exitcode
+    netStats = {}
+    for interface in endNetUsage:
+        netStats[interface] = {'bytesSent' : endNetUsage[interface].bytes_sent - startNetUsage[interface].bytes_sent,
+                               'bytesRcvd' : endNetUsage[interface].bytes_recv - startNetUsage[interface].bytes_recv}
+    
+    return p.exitcode, netStats
         
 def runSet():
     toggleVPN('disconnect')    
     
-    configs = Configs()
+    configs  = Configs()
+    netStats = {}
     
     for i in range(configs.get('rounds')):
+        netStats[i+1] = {}
         
         if (i == configs.get('rounds')-1) and (not configs.get('doVPNs')) and (not configs.get('doRANDOMs')):
             configs.set('endOfTest', True)
@@ -165,7 +180,7 @@ def runSet():
             print '\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
             print 'DOING ROUND: {} -- {} -- {}'.format(i+1, configs.get('testID'), configs.get('pcap_folder'))
             print '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
-            exitCode = run_one(i, configs.get('tries'), vpn=False)
+            exitCode, netStats[i+1]['NOVPN'] = run_one(i, configs.get('tries'), vpn=False)
             
             if exitCode == 3:
                 os._exit(3)
@@ -190,7 +205,7 @@ def runSet():
                 print '\n\tdoNOVPNs is False --> changing testID from RANDOM to NOVPN for server compatibility!\n'
                 configs.set('testID', 'NOVPN_'+str(i+1))
             
-            run_one(i, configs.get('tries'), vpn=False)
+            exitCode, netStats[i+1]['RANDOM'] = run_one(i, configs.get('tries'), vpn=False)
             configs.set('pcap_folder', configs.get('pcap_folder').replace('_random', ''))
             time.sleep(2)
         
@@ -214,7 +229,7 @@ def runSet():
             print '\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
             print 'DOING ROUND: {} -- {} -- {}'.format(i+1, configs.get('testID'), configs.get('pcap_folder'))
             print '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
-            run_one(i, configs.get('tries'), vpn=True)
+            exitCode, netStats[i+1]['VPN'] = run_one(i, configs.get('tries'), vpn=True)
             
             if configs.get('sameInstance') is True:
                 configs.set('serverInstanceIP', serverInstanceIP)
@@ -226,6 +241,8 @@ def runSet():
     
     toggleVPN('disconnect')
     
+    return netStats
+
 def main():
     PRINT_ACTION('Reading configs file and args)', 0)
     configs = Configs()
@@ -252,11 +269,28 @@ def main():
     configs.set('doNOVPNs'         , True)
     configs.set('doVPNs'           , True)
     configs.set('doRANDOMs'        , False)
-    
+    configs.set('ask4analysis'     , False)
     configs.set('analyzerPort'     , 56565)
     
     configs.read_args(sys.argv)
-    configs.check_for(['pcapsFile'])
+    
+    try:
+        pcapsFile   = configs.get('pcapsFile')
+        pcapFolders = []
+        
+        with open(pcapsFile, 'r') as f:
+            lines = f.readlines()
+            for pcapFolder in lines:
+                pcapFolder = pcapFolder.strip()
+                pcapFolders.append(pcapFolder)
+                
+    except KeyError:
+        try:
+            pcapFolders = [configs.get('pcaps')]
+        except KeyError:
+            print 'You should feed either pcapsFile or pcaps'
+            sys.exit()
+        
     
     #The except does a DNS lookup and resolves server's IP address
     #This is essential to be done only ONCE to assure that client
@@ -274,11 +308,15 @@ def main():
     if not configs.get('multipleInterface'):
         configs.set('publicIP', '')
     else:
-        configs.check_for(['publicIP'])
+        try:
+            publicIPInterface = configs.get('publicIPInterface')
+            configs.set('publicIP', getIPofInterface( publicIPInterface ))
+        except KeyError:
+            configs.check_for(['publicIP'])
     
     try:
         configs.get('pcap_folder')
-        print '\nYou should not provide \"--pcap_folder\" to this script.\n'
+        print '\nYou should not provide \"--pcap_folder\" to this script.'
         print '\nUse \"--pcaps\" to feed all your pcap folders (comma separated)\n'
         sys.exit()
     except:
@@ -313,25 +351,68 @@ def main():
     PRINT_ACTION('Firing off ...', 0)
     ui        = UI(configs.get('serverInstanceIP'), configs.get('analyzerPort'))
     permaData = PermaData()
-#     print ui.getSingleResult('yrTouJjKY0', 27)
-#     print ui.getMultiResults('yrTouJjKY0', maxHistoryCount=27, limit=2 )
-#     print ui.ask4analysis('BFIOM5F6J9', 1)
-#     sys.exit()
+
+    if configs.get('ask4analysis'):
+        ui.ask4analysis(configs.get('userID'), configs.get('historyCount'))
+        sys.exit()
     
-    with open(configs.get('pcapsFile'), 'r') as f:
-        lines = f.readlines()
-        for pcapFolder in lines:
-            pcapFolder = pcapFolder.strip()
+    netStats = {}
+    
+    for pcapFolder in pcapFolders:
             
             print '\tDoing:', pcapFolder
             
             configs.set('pcap_folder', pcapFolder)
             
             permaData.updateHistoryCount()
-            runSet()
+            netStats[pcapFolder] = runSet()
             configs.set('endOfTest', False)
             PRINT_ACTION('Asking for analysis', 0)
-            print '\t', ui.ask4analysis(permaData.id, permaData.historyCount)
+            try:
+                print '\t', ui.ask4analysis(permaData.id, permaData.historyCount)
+            except:
+                print '\n\n\n####### COULD NOT ASK4ANALYSIS!!!!! #######\n\n\n'
+                
+                
+    json.dump(netStats, open('kir.json', 'w'))
     
+    netStatsTotal    = {}
+    
+    for pcapFolder in netStats:
+        netStatsTotal[pcapFolder] = { 'NOVPN':{}, 'VPN':{}, 'RANDOM':{} }
+        for r in netStats[pcapFolder]:
+            for case in netStats[pcapFolder][r]:
+                for interface in netStats[pcapFolder][r][case]:
+                    try:
+                        netStatsTotal[pcapFolder][case][interface]
+                    except KeyError:
+                        netStatsTotal[pcapFolder][case][interface] = {'sent':0, 'rcvd':0}
+                    finally:
+                        netStatsTotal[pcapFolder][case][interface]['sent'] += netStats[pcapFolder][r][case][interface]['bytesSent']
+                        netStatsTotal[pcapFolder][case][interface]['rcvd'] += netStats[pcapFolder][r][case][interface]['bytesRcvd']
+                    
+                    print '\t'.join(map(str, [r, case, pcapFolder.rpartition('/')[2], interface, 
+                                            round(netStats[pcapFolder][r][case][interface]['bytesSent']/1000000.0, 3), 
+                                            round(netStats[pcapFolder][r][case][interface]['bytesRcvd']/1000000.0, 3)]))
+    
+    print '\n\nTotal network activity:\n\n'
+    totalSent = {}
+    totalRcvd = {}
+    for pcapFolder in netStatsTotal:
+        for case in netStatsTotal[pcapFolder]:
+            for interface in netStatsTotal[pcapFolder][case]:
+                try:
+                    totalSent[interface] += netStatsTotal[pcapFolder][case][interface]['sent']
+                    totalRcvd[interface] += netStatsTotal[pcapFolder][case][interface]['rcvd']
+                except KeyError:
+                    totalSent[interface]  = netStatsTotal[pcapFolder][case][interface]['sent']
+                    totalRcvd[interface]  = netStatsTotal[pcapFolder][case][interface]['rcvd']
+                    
+                print '\t'.join(map(str, [pcapFolder, case, interface, round(netStatsTotal[pcapFolder][case][interface]['sent']/1000000.0, 3), round(netStatsTotal[pcapFolder][case][interface]['rcvd']/1000000.0, 3)]))
+    
+    print '\n\nTotal TOTAL network activity:\n\n'
+    for interface in totalSent:
+        print '\t'.join(map(str, [interface, round(totalSent[interface]/1000000.0, 3), round(totalRcvd[interface]/1000000.0, 3)]))
+        
 if __name__=="__main__":
     main()

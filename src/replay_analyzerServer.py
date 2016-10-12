@@ -5,7 +5,7 @@ by:    Arash Molavi Kakhki
        
        
 USAGE:
-    sudo python replay_analyzerServer.py --port=56565
+    sudo python replay_analyzerServer.py --port=56565 --ConfigFile=configs_local.cfg 
     
     IMPORTANT NOTES: always run in sudo mode
     
@@ -89,6 +89,7 @@ def analyzer(args, resultsFolder, xputInterval, alpha):
     
     try:
         db.insertResult(resObj)
+        db.updateReplayXputInfo(resObj)
     except Exception as e:
         LOG_ACTION(logger, 'Insertion exception:'+str(e), level=logging.ERROR)
     

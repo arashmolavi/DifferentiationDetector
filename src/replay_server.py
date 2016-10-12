@@ -8,7 +8,7 @@ by: Arash Molavi Kakhki (arash@ccs.neu.edu)
 Goal: server replay script
 
 Usage:
-    python replay_server.py --pcap_folder=[]
+    python replay_server.py --ConfigFile=configs_local.cfg 
 
 Mandatory arguments:
     pcap_folder: This is the folder containing parsed files necessary for the replay
@@ -28,7 +28,7 @@ To kill the server:
 
 import gevent.monkey; gevent.monkey.patch_all()
 
-import sys, time, numpy, pickle, atexit, re, json, socket, urllib2, random, base64
+import sys, time, numpy, pickle, atexit, re, json, socket, urllib2, random, base64, string
 from python_lib import *
 try:
     import db as DB
@@ -209,6 +209,15 @@ class TCPServer(object):
         
         #0- Determine csp from hash Lookup-Table (See above for details)
         new_data       = connection.recv( self.buff_size )
+        
+#         new_data = new_data.replace('akdjbwqeoihnqwrgn3qrion3jbefvlknqpvnijbvliqvboqbv;oqibviu3vboqibniurhbf;hqvoivbnq;eorbnorbnvoe;irwbvoqerb;oieqrbvoeiqrbvilequbr;iqjeriveqrovnero;ivnqeoibvneoirboierbno;erqibno;eibbf',
+#                                     'o=AQE1Os28w8I_1z-RBFqynNMyy2nijvCHpMn__sItVKgE3T3ysmj5VGCHOZSr1wBA3Dk2a14PhhUuBRt2BoQJbZKh3IFQvNMAuENrH5zDX6Oz9Osf9JQEvIqr0Qexoh7t7o50&v=3&e=1417080434&t=blQ_gy241DnHI9TzTOIE861yNL4')
+#         new_data = new_data.replace('129.10.11.12', '207.210.142.62')
+#         new_data = new_data.replace('arashmolavijoon', 'googlevideo.com')
+#         new_data = new_data.replace('    Host:hulu.com', 'video.xx.fbcdn.net', 1)
+#         new_data = new_data.replace('x=', 'o=', 1)
+#         new_data = new_data.replace('kakhkia', 'netflix')
+        
         new_data_4hash = new_data[:self.hashSampleSize]
         
         if (new_data.startswith('GET /WHATSMYIPMAN')) or (new_data == 'WHATSMYIPMAN?'):
@@ -307,7 +316,7 @@ class TCPServer(object):
         else:
             extraBytes = 0
         
-#         print 'found csp:', csp
+#         print '\tfound csp:', csp
         
         buffer_len = len(new_data) - extraBytes
 
@@ -343,12 +352,55 @@ class TCPServer(object):
                     
                     buffer_len += len(new_data)
             
+#             connection.sendall(" ")
+#             connection.sendall(" ")
+            
             #Once the request is fully received, send the response
+            
+            randomizedCount = 0
+            randomizedTshld = 1000000
+            
             time_origin = time.time()
             for response in response_set.response_list:
                 if self.timing is True:
                     gevent.sleep(seconds=((time_origin + response.timestamp) - time.time()))
                 try:
+                    
+#                     if randomizedCount < randomizedTshld:
+#                        randomizedCount += 1
+#                        response.payload = ''.join(random.choice(string.ascii_letters + string.digits) for x in range(len(response.payload)))
+                    
+#                     print response.payload
+
+#                     response.payload = response.payload.replace("application/octet-stream", 
+#                                                                 "ksjdgvfidsgfiuskdhfkisdd", 1)
+
+#                     response.payload = response.payload.replace("Content-Type: video/mp4", 
+#                                                                 "Content-Type: skdhfkisd", 1)
+
+#                     response.payload = response.payload.replace("Content-Type: video/mp2t", 
+#                                                                 "Content-Type: skdhfkisdd", 1)
+#                     response.payload = response.payload.replace("Content-Type: video/MP2T", 
+#                                                                 "Content-Type: skdhfkisdd", 1)
+                    
+#                     response.payload = str(response.payload).replace("flix", "kakh")
+#                     response.payload = str(response.payload).replace("FLIX", "KAKH")
+                    
+#                     response.payload = str(response.payload).replace("Media Library",
+#                                                                      "jsidgfiwuhgfe")
+#                     response.payload = str(response.payload).replace("Video Media",
+#                                                                      "jsidgfiwuhg")
+#                     response.payload = response.payload.replace("application/octet-stream", 
+#                                                                 "kakhkiation/arash-molavi")
+#                     response.payload = response.payload.replace("Content-Range: bytes", 
+#                                                                 "Arashoo-Kakhk: whats")
+#                     response.payload = response.payload.replace("PiffStrm", 
+#                                                                 "Arashoos")
+#                     response.payload = response.payload.replace('X-Session-Info: addr=54.160.198.73;port=60761;argp=6.dGkeAWOk1bt3qCcblJ-iRqrk4yJ-5ZIwwTZnAprMzWI',
+#                                                                 'ljhnfownofnwoi: fnoweifnowiefnowefnwekohwgbfiuwbfiuwebiuwbeibweviuwebvibwevibweviwbeviwebvibwviub')
+#                     x = response.payload.partition('Netflix')
+#                     connection.sendall(str(x[0]))
+#                     connection.sendall(str(x[1]+x[2]))
                     connection.sendall(str(response.payload))
                 except:
                     return False
@@ -936,7 +988,10 @@ class SideChannel(object):
         LOG_ACTION(logger, 'Stopping tcpdump for: id: {}, historyCount: {}'.format(dClient.realID, dClient.historyCount), indent=2, action=False)
         tcpdumpResult = dClient.dump.stop()
         LOG_ACTION(logger, 'tcpdumpResult: {}'.format(tcpdumpResult), indent=3, action=False)
-        self.logger_q.put( '\t'.join(dClient.get_info() + tcpdumpResult) )
+        try:
+            self.logger_q.put( '\t'.join(dClient.get_info() + tcpdumpResult) )
+        except:
+            pass
         
         #Create _out.pcap (only if the replay was successful)
         if dClient.secondarySuccess:
@@ -1243,7 +1298,9 @@ def load_Qs(serialize='pickle'):
                     print 'DUP in finalLUT', protocol, x, finalLUT[protocol][x], LUT[replayName][protocol][x]
                 except:
                     pass
-                finalLUT[protocol][x] = LUT[replayName][protocol][x]
+                finally:
+                    finalLUT[protocol][x] = LUT[replayName][protocol][x]
+                    
     print c, len(finalLUT['tcp'])+len(finalLUT['udp'])
     
     finalgetLUT = {}
@@ -1256,7 +1313,8 @@ def load_Qs(serialize='pickle'):
                 print 'DUP in finalgetLUT', csp
             except:
                 pass
-            finalgetLUT[csp] = getLUT[replayName][csp]
+            finally:
+                finalgetLUT[csp] = getLUT[replayName][csp]
                 
     print c, len(finalgetLUT)
     

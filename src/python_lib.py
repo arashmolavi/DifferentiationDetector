@@ -457,24 +457,7 @@ class Configs(object):
 class Instance(object):
     def __init__(self):
         self.ips = {
-                    'replay'                : 'replay.meddle.mobi',
-                    'replay-s'              : 'replay-s.meddle.mobi',
-                    'replay-s-test'         : 'replay-s-test.meddle.mobi',
-                    'replay-test'           : 'replay-test.meddle.mobi',
-                    'replay-s-virginia-1'   : '54.224.180.90',
-                    'replay-s-virginia-2'   : '54.158.246.2',
-                    'replay-s-california-1' : '52.8.96.140',
-                    'replay-s-saopaulo-1'   : '54.207.74.17',
-                    'replay-s-ireland-1'    : '52.17.232.175',
-                    'replay-s-tokyo-1'      : '52.69.9.163',
-                    'replay-s-sydney-1'     : '54.66.187.160',
-                    'VPN'                   : '10.101.101.101',
-                    'meddle3'               : '54.144.205.159',
-                    '1ec2'                  : '54.84.64.77'   ,
-                    '2ec2'                  : '54.86.43.223'  ,
-                    'achtung'               : '129.10.115.141',
-                    'koo2'                  : '54.163.170.96' ,
-                    'tuco'                  : '207.191.33.123',
+                    'yourInstanceName'      : 'yourInstanceAddress',
                    }
     def getIP(self, machineName):
         ip = socket.gethostbyname( self.ips[machineName] )
@@ -646,3 +629,27 @@ def java_byte_hashcode(s):
             i = i - 256
         hashCode = (31 * hashCode + i) & 0xFFFFFFFF
     return hashCode
+
+def toggleVPN(command, waitTime=10):
+    '''
+    This function connects/disconnects the VPN
+    
+    NOTE: such function is, by nature, platform dependent!
+          Current script is an AppleScript and for Mac OS X.
+          Need scripts for Linux and maybe Windows (urgh!) too! (shouldn't be too complicated tho)
+    '''
+    print commands.getoutput('./meddle_vpn.sh ' + command)
+    
+    for i in range(waitTime):
+        status = commands.getoutput('./meddle_vpn.sh status').split('\n')[0]
+        if command.lower() == 'connect':
+            if status == 'Connected':
+                return True
+        if command.lower() == 'disconnect':
+            if status == 'Disconnected':
+                return True
+        time.sleep(1)
+    
+    return False
+    
+#     print commands.getoutput('./meddle_vpn_old.sh ' + command)

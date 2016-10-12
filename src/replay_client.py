@@ -75,13 +75,29 @@ Exit codes:
 #######################################################################################################
 '''
 
-import sys, socket, time, numpy, threading, select, pickle, Queue
+import sys, commands, socket, time, numpy, threading, select, pickle, Queue
 from python_lib import *
 
 DEBUG = 4
 
 activityQ = Queue.Queue()
 errorQ    = Queue.Queue()
+
+def getIPofInterface(interface, VPN=False):
+    if VPN:
+        interface = 'tun0'
+    
+    output = commands.getoutput('ifconfig')
+    lines  = output.split('\n')
+    
+    for i in range(len(lines)):
+        if lines[i].startswith(interface+':'):
+            break
+    
+    l = lines[i+3].strip()
+    assert( l.startswith('inet') )
+
+    return l.split(' ')[1]
 
 class ReplayObj(object):
     def __init__(self, id, replay_name, ip, tcpdump_int, realID, incomingTime=None, dumpName=None, testID=None):
@@ -376,6 +392,7 @@ class SideChannel(object):
 
         self.sock        = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.bind((Configs().get('publicIP'), 0))
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.sock.connect(self.instance)
         
@@ -797,7 +814,11 @@ def initialSetup():
     if not configs.get('multipleInterface'):
         configs.set('publicIP', '')
     else:
-        configs.check_for(['publicIP'])
+        try:
+            publicIPInterface = configs.get('publicIPInterface')
+            configs.set('publicIP', getIPofInterface( publicIPInterface, VPN=(configs.get('testID').startswith('VPN')) ))
+        except KeyError:
+            configs.check_for(['publicIP'])
     
     PRINT_ACTION('Creating results folders', 0)
     if not os.path.isdir(configs.get('resultsFolder')):
@@ -817,4 +838,3 @@ def main():
     
 if __name__=="__main__":
     main()
-    
