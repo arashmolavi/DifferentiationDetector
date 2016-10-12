@@ -457,7 +457,9 @@ class Configs(object):
 class Instance(object):
     def __init__(self):
         self.ips = {
-                    'yourInstanceName'      : 'yourInstanceAddress',
+                    'yourInstanceName'    : 'yourInstanceAddress',
+                    'example1'            : 'my.example1.com',
+                    'example2'            : '1.2.3.4',
                    }
     def getIP(self, machineName):
         ip = socket.gethostbyname( self.ips[machineName] )
